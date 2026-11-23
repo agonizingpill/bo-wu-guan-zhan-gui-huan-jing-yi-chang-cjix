@@ -89,6 +89,39 @@ def main():
 
     for index, values in enumerate([(20.1, 50.0, 590), (20.0, 50.2, 605), (20.2, 49.8, 600), (20.1, 50.1, 610), (20.0, 49.9, 600), (20.2, 50.0, 615)]):
         sample(cases['MC-04'], base + timedelta(minutes=index * 10), *values, False, '日常巡检基线')
+    # 当班温湿越出保护范围（MC-04 温度上限 22.5），用于演示温湿加急，不占例行名额
+    mc04_violation = sample(cases['MC-04'], base + timedelta(minutes=70), 23.6, 50.4, 640, False, '当班温度越限，触发加急巡检')
+
+    def pre_shift_event(case_key, sample_id, when, score, reason):
+        existing = fetch_one('SELECT id FROM anomaly_events WHERE sample_id=%s', (sample_id,))
+        if existing:
+            return
+        execute(
+            '''INSERT INTO anomaly_events
+               (case_id, sample_id, algorithm_run_id, score, threshold, anomaly_type, severity, status,
+                door_context, consecutive_count, escalated_to_curator, reason, created_at)
+               VALUES (%s,%s,NULL,%s,-0.10,'environment_outlier','high','closed',FALSE,1,FALSE,%s,%s)''',
+            (cases[case_key], sample_id, score, reason, when),
+        )
+
+    # 班前（上一班 17:xx）历史异常分：各柜尺度不同，例行排程按各自基线算标准化偏离。
+    # 与当班首采间隔 20 分钟，遵守 30 分钟采样间隔上限。
+    pre_shift = base - timedelta(minutes=20)
+    pre_shift_event('MC-01', sample(cases['MC-01'], pre_shift, 21.0, 49.0, 620, False, '班前历史采样'), pre_shift, -0.05, '班前历史离群（基线对照）')
+    pre_shift_event('MC-01', sample(cases['MC-01'], pre_shift - timedelta(minutes=10), 20.9, 48.9, 615, False, '班前历史采样'), pre_shift - timedelta(minutes=10), -0.06, '班前历史离群（基线对照）')
+    pre_shift_event('MC-03', sample(cases['MC-03'], pre_shift, 21.2, 45.0, 650, False, '班前历史采样'), pre_shift, -0.12, '班前历史离群（基线对照）')
+    pre_shift_event('MC-03', sample(cases['MC-03'], pre_shift - timedelta(minutes=10), 21.1, 45.1, 648, False, '班前历史采样'), pre_shift - timedelta(minutes=10), -0.10, '班前历史离群（基线对照）')
+    pre_shift_event('MC-04', sample(cases['MC-04'], pre_shift, 20.1, 50.0, 595, False, '班前历史采样'), pre_shift, -0.20, '班前历史离群（基线对照）')
+    pre_shift_event('MC-04', sample(cases['MC-04'], pre_shift - timedelta(minutes=10), 20.0, 49.8, 590, False, '班前历史采样'), pre_shift - timedelta(minutes=10), -0.19, '班前历史离群（基线对照）')
+    # 当班温湿越限对应的加急候选事件（无班前分数也不影响加急）
+    execute(
+        '''INSERT INTO anomaly_events
+           (case_id, sample_id, algorithm_run_id, score, threshold, anomaly_type, severity, status,
+            door_context, consecutive_count, escalated_to_curator, reason, created_at)
+           SELECT %s,%s,NULL,-0.22,-0.10,'environment_outlier','high','open',FALSE,1,FALSE,%s,%s
+           WHERE NOT EXISTS (SELECT 1 FROM anomaly_events WHERE sample_id=%s)''',
+        (cases['MC-04'], mc04_violation, '当班温度越出保护范围，等待加急巡检', base + timedelta(minutes=70), mc04_violation),
+    )
 
     execute("UPDATE display_cases SET last_sample_at=(SELECT MAX(sampled_at) FROM environment_samples WHERE case_id=display_cases.id)")
     execute(
@@ -97,7 +130,7 @@ def main():
            WHERE NOT EXISTS (SELECT 1 FROM audit_logs WHERE action='seed_demo' AND detail->>'batch'='night-shift-2026-11-21')''',
         (operator['id'],),
     )
-    print('seed_demo complete: 4 display cases, 28 samples, 2 seeded anomaly events, 3 users')
+    print('seed_demo complete: 4 display cases, 35 samples, 9 anomaly events (含 6 条班前历史对照), 3 users')
 
 
 if __name__ == '__main__':

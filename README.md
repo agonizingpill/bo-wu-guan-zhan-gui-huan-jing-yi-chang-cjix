@@ -82,22 +82,31 @@ Compose 恰好包含 `frontend`、`backend`、`worker`、`db`、`redis` 五个�
 ## 枚举出现位置
 
 - `CASE_STATUSES`、`ANOMALY_STATUSES`、`ANOMALY_TYPES`、`DUTY_ACTION_TYPES`、`CHECK_RESULTS` 位于 `backend/src/constants/enums.py`，数据库约束位于 `backend/migrations/001_init.sql`，前端展示映射位于 `frontend/src/app.js`。
+- 夜班排程枚举 `NIGHT_ROUND_KINDS`（routine / expedited）、`NIGHT_ROUND_STATUSES`（pending / superseded / departed）与 `ROUTINE_SLOT_LIMIT=2` 位于同一枚举文件，表约束位于 `backend/migrations/002_night_rounds.sql`，偏离排序纯函数位于 `backend/src/night_round_ranking.py`。
 - 角色 `operator / supervisor / viewer` 位于用户表约束、JWT 依赖 `backend/src/middlewares/auth.py`、路由依赖和前端用户状态中。
-- 事件生命周期与值守动作的前置条件位于 `backend/src/main.py` 的异常、值守、巡检和关闭路由。
+- 事件生命周期与值守动作的前置条件位于 `backend/src/main.py` 的异常、值守、巡检和关闭路由；夜班排程的并发与改派口径位于 `backend/src/night_round_store.py`、`backend/src/night_round_routes.py`。
 
 ## 目录
 
 ```text
 backend/
   migrations/001_init.sql
+  migrations/002_night_rounds.sql
   scripts/seed_demo.py
   src/main.py
+  src/night_round_ranking.py
+  src/night_round_store.py
+  src/night_round_routes.py
   src/services/algorithm.py
   src/worker.py
+  tests/test_night_round_ranking.py
+  tests/test_night_round_store_helpers.py
 frontend/
   index.html
   nginx.conf
   src/app.js
+  src/night-rounds.js
+  src/night-rounds.css
   src/styles.css
 docker-compose.yml
 ```
@@ -127,3 +136,25 @@ Internal evaluation project. No external distribution license is granted.
 - 采样断档补齐验收
 - 异常后环境解除观察
 - 馆长升级与文物放行
+
+## 夜班巡检排程
+
+登录后在侧栏打开「夜班巡检」（文物巡检页也有今晚安排摘要）。排程把**例行两席**与**温湿加急**分开处理，全部安排和入选依据都可在页面追溯。
+
+- 各柜异常分尺度不同，**不直接比较绝对分**：以每柜班前历史异常分（均值、样本标准差）为基线，计算当班最新分的标准化偏离（z 分数；零方差时退化为均值差），偏离最大的柜优先，**每柜最多一席，全夜班共 2 席**。
+- 没有班前历史异常分的展柜**不进入例行候选**，页面在候选表中单独标注原因。
+- 温湿（温度或相对湿度）越出展柜保护范围的采样**立即加急**，不等异常评分，也**不占用例行名额**；门磁开启段的越限同样加急并在依据中标注。
+- 新评分可**改派尚未出发**的例行安排（位次与依据快照同步刷新）；**已出发的安排保留当时依据**，继续占用名额、不参与重排。
+- 出发确认与改派通过行级锁 + 班次级咨询锁互斥：**被换下（superseded）的安排不能确认出发**，返回 409。
+- 同一班次重跑按 `(班次, 展柜, 类型)` 部分唯一索引保证幂等，**不会新增同柜重复巡检单**。
+- 审计日志记录每次重排（新增/改派/换下/保留已出发）、加急生成与出发确认，且与业务变更在同一事务内写入。
+
+### 排程接口
+
+| 方法与路径 | 角色 | 说明 |
+|---|---|---|
+| `GET /night-rounds` | 全部登录角色 | 查询班次安排、例行候选排序与未入选/剔除原因、温湿越限清单 |
+| `GET /night-rounds/shift-windows` | 全部登录角色 | 当前夜班窗口及库内可切换的历史班次 |
+| `POST /night-rounds/routine/plan` | operator / supervisor | 按班前偏离（重）排例行两席，重跑幂等 |
+| `POST /night-rounds/expedited/sync` | operator / supervisor | 同步温湿越限为加急单，不占例行名额 |
+| `POST /night-rounds/{id}/depart` | operator / supervisor | 确认出发；已换下的安排返回 409 |

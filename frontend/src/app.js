@@ -23,6 +23,7 @@ const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'
 const fmt = (value) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
 const label = (value) => ({active:'在岗', maintenance:'维护', retired:'停用', open:'待处置', triaged:'已接单', escalated:'已升级', resolved:'待关闭', closed:'已关闭', watch:'观察', high:'高', critical:'严重', door_interference:'门开干扰', environment_outlier:'环境离群', continuous_drift:'连续偏移'}[value] || value);
 const notify = (message) => { state.notice = message; render(); setTimeout(() => { state.notice = ''; render(); }, 3600); };
+window.addEventListener('museum-notice', (event) => notify(event.detail));
 
 function render() {
   document.querySelector('#app').innerHTML = state.token ? shell() : login();
@@ -48,7 +49,7 @@ function login() {
 }
 
 function shell() {
-  const title = { monitor: '展柜监测', anomalies: '异常事件', inspections: '文物巡检', case: '展柜档案' }[state.page];
+  const title = { monitor: '展柜监测', anomalies: '异常事件', inspections: '文物巡检', rounds: '夜班巡检排程', case: '展柜档案' }[state.page];
   return `<div class="app-shell">
     <aside class="sidebar">
       <div class="brand"><span class="brand-dot"></span><div><strong>MCA</strong><small>夜班值守台</small></div></div>
@@ -57,6 +58,7 @@ function shell() {
         ${nav('monitor','展柜监测','▧')}
         ${nav('anomalies','异常事件','◒')}
         ${nav('inspections','文物巡检','⊙')}
+        ${nav('rounds','夜班巡检','◷')}
         ${nav('case','展柜档案','⌘')}
       </nav>
       <div class="sidebar-foot"><span class="pulse"></span>传感链路在线<div class="user-chip"><b>${esc(state.user?.display_name || '')}</b><small>${esc(state.user?.role || '')} · 末次登录刚刚</small></div><button id="logout" class="logout">退出夜班台</button></div>
@@ -85,8 +87,11 @@ function renderContent() {
   if (state.page === 'monitor') target.innerHTML = monitorPage();
   if (state.page === 'anomalies') target.innerHTML = anomaliesPage();
   if (state.page === 'inspections') target.innerHTML = inspectionsPage();
+  if (state.page === 'rounds') target.innerHTML = '<div id="night-rounds-page"></div>';
   if (state.page === 'case') target.innerHTML = casePage();
   bindPage();
+  if (state.page === 'rounds') window.dispatchEvent(new CustomEvent('museum-load-night-rounds'));
+  if (state.page === 'inspections') hydrateInspectionRounds();
 }
 
 function monitorPage() {
@@ -111,7 +116,25 @@ function eventRow(e) { return `<button class="event-row ${state.selectedEvent===
 function eventDetail(e) { return `<div class="detail-kicker"><span class="severity ${e.severity}">${e.severity}</span><span>${label(e.anomaly_type)}</span><span>${label(e.status)}</span></div><h2>${esc(e.case_code)} / ${esc(e.artifact_title)}</h2><p class="detail-copy">${esc(e.reason)}</p><div class="data-strip"><div><small>异常分数</small><b>${Number(e.score).toFixed(3)}</b></div><div><small>采样时间</small><b>${fmt(e.sampled_at)}</b></div><div><small>门磁</small><b>${e.door_open?'开启干扰':'关闭'}</b></div></div><div class="measure-grid"><div><span>温度</span><b>${e.temperature} °C</b></div><div><span>相对湿度</span><b>${e.humidity} %</b></div><div><span>CO₂</span><b>${e.co2_ppm} ppm</b></div><div><span>连续计数</span><b>${e.consecutive_count}</b></div></div><div class="action-box"><p class="eyebrow">DUTY ACTION / 值守处置</p><div class="action-buttons">${e.door_context?'<button class="button amber" data-action="door">完成关门复核</button>':'<button class="button" data-action="adjust">记录环境调整</button>'}<button class="button" data-action="inspect">安排文物巡检</button>${e.status==='escalated'?'<button class="button dark" data-action="curator">记录馆长处置</button>':''}<button class="button primary" data-action="close">关闭异常</button></div><small>关闭条件：已完成值守动作 + 文物巡检通过。升级事件需追加馆长处置记录。</small></div>`; }
 
 function inspectionsPage() {
-  return `<div class="inspection-layout"><section class="panel inspection-intro"><p class="eyebrow">ARTIFACT CHECK / POST-INCIDENT</p><h2>巡检是异常闭环的最后一道门</h2><p>每一次环境异常都要留下文物状态证据。巡检通过后，主管才可以关闭异常。失败会把事件重新打开，并保留原因与操作者。</p><div class="inspection-mark">⊙</div></section><section class="panel inspection-table"><div class="panel-head"><div><p class="eyebrow">RECENT CHECKS</p><h2>最近巡检</h2></div><button class="text-button" data-page="anomalies">回到异常队列 →</button></div>${state.anomalies.map(e => `<div class="inspection-row"><span class="case-code">${esc(e.case_code)}</span><span><b>${esc(e.artifact_title)}</b><small>${label(e.anomaly_type)} · ${fmt(e.created_at)}</small></span><span class="result ${e.passed_checks ? 'pass' : 'pending'}">${e.passed_checks ? '已通过' : '待巡检'}</span><button class="text-button" data-event="${e.id}">打开 →</button></div>`).join('')}</section></div>`;
+  return `<div class="inspection-layout"><section class="panel inspection-intro"><p class="eyebrow">ARTIFACT CHECK / POST-INCIDENT</p><h2>巡检是异常闭环的最后一道门</h2><p>每一次环境异常都要留下文物状态证据。巡检通过后，主管才可以关闭异常。失败会把事件重新打开，并保留原因与操作者。</p><div class="inspection-mark">⊙</div></section><section class="panel inspection-table"><div class="panel-head"><div><p class="eyebrow">RECENT CHECKS</p><h2>最近巡检</h2></div><button class="text-button" data-page="anomalies">回到异常队列 →</button></div>${nightRoundSummary()}${state.anomalies.map(e => `<div class="inspection-row"><span class="case-code">${esc(e.case_code)}</span><span><b>${esc(e.artifact_title)}</b><small>${label(e.anomaly_type)} · ${fmt(e.created_at)}</small></span><span class="result ${e.passed_checks ? 'pass' : 'pending'}">${e.passed_checks ? '已通过' : '待巡检'}</span><button class="text-button" data-event="${e.id}">打开 →</button></div>`).join('')}</section></div>`;
+}
+function nightRoundSummary() {
+  return `<div id="inspection-round-summary" class="round-summary-band"><p class="eyebrow">NIGHT ROUNDS / 今晚安排</p><button class="text-button" data-page="rounds">打开夜班巡检排程 →</button><div class="round-summary-body">正在读取今晚巡检安排…</div></div>`;
+}
+async function hydrateInspectionRounds() {
+  const host = document.querySelector('#inspection-round-summary .round-summary-body');
+  if (!host) return;
+  try {
+    const view = await api('/night-rounds');
+    const routine = view.tasks.filter(t => t.round_kind === 'routine' && ['pending', 'departed'].includes(t.status));
+    const expedited = view.tasks.filter(t => t.round_kind === 'expedited' && t.status !== 'superseded');
+    const line = (t) => `${t.code}（${t.slot_no ? `第${t.slot_no}席·` : ''}${t.status === 'departed' ? '已出发' : '待出发'}）`;
+    host.innerHTML = `
+      <div><b>例行 ${routine.length}/${view.routine_slot_limit} 席</b><small>${routine.length ? routine.map(line).join('，') : '暂无入选（无班前历史分不排例行）'}</small></div>
+      <div><b>温湿加急 ${expedited.length} 单</b><small>${expedited.length ? expedited.map(line).join('，') : '暂无温湿越限'}</small></div>`;
+  } catch (error) {
+    host.textContent = `巡检安排读取失败：${error.message}`;
+  }
 }
 function casePage() { const current = state.cases.find(c => c.id === state.selectedCase) || state.cases[0]; return `<div class="case-layout"><section class="panel case-directory"><div class="panel-head"><div><p class="eyebrow">DISPLAY CASE REGISTER / 04</p><h2>展柜档案</h2></div><span class="filter-pill">${state.cases.length} 个在岗柜</span></div>${state.cases.map(c => `<button class="directory-item ${current?.id===c.id?'selected':''}" data-case="${c.id}"><span>${esc(c.code)}</span><b>${esc(c.artifact_title)}</b><small>${esc(c.zone)}</small></button>`).join('')}</section><section class="panel case-detail">${current ? caseDetail(current) : empty('没有展柜档案', '先创建一个在岗展柜。')}</section></div>`; }
 function caseDetail(c) { return `<div class="case-heading"><div><p class="eyebrow">${esc(c.gallery)} / ${esc(c.zone)}</p><h2>${esc(c.artifact_title)}</h2><span class="case-code">${esc(c.code)} · ${esc(c.artifact_code)}</span></div><span class="case-status">${label(c.status)}</span></div><div class="threshold-band"><div><small>温度窗口</small><b>${c.target_temp_min} — ${c.target_temp_max} °C</b></div><div><small>湿度窗口</small><b>${c.target_rh_min} — ${c.target_rh_max} %</b></div><div><small>门磁编号</small><b>${esc(c.door_sensor_id)}</b></div></div><div class="sample-table"><div class="table-title"><span>最近环境采样</span><small>${c.samples?.length || c.sample_count} 条记录</small></div>${(c.samples || []).slice(0,8).map(s => `<div class="sample-row"><span>${fmt(s.sampled_at)}</span><b>${s.temperature} °C</b><b>${s.humidity} %</b><b>${s.co2_ppm} ppm</b><span class="door-tag ${s.door_open?'open':''}">${s.door_open?'门开':'闭合'}</span></div>`).join('')}</div><button class="button primary" id="analyze-case" data-case-id="${c.id}">重新运行异常识别 ↗</button></div>`; }
